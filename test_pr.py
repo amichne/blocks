@@ -9,6 +9,33 @@ ROOT = Path(__file__).resolve().parent
 
 
 class PullRequestFlow(TestCase):
+    def test_install_command_and_skill_outside_checkout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="blocks install ") as temp:
+            home = Path(temp)
+            env = {**os.environ, "HOME": temp}
+            install = [str(ROOT / "install"), "--source", str(ROOT)]
+            for _ in range(2):
+                subprocess.run(
+                    install, env=env, cwd=home, check=True, capture_output=True
+                )
+            binary = home / ".local/bin/pull-request"
+            usage = subprocess.check_output(
+                [binary, "--help"], cwd=home, env=env, text=True
+            )
+            self.assertIn("Run pull-request with no arguments", usage)
+            for name in ("pull-request", "blocks-workflows"):
+                skill = Path("skills") / name / "SKILL.md"
+                self.assertEqual(
+                    (home / ".agents" / skill).read_bytes(), (ROOT / skill).read_bytes()
+                )
+            binary.unlink()
+            binary.write_text("user command")
+            failed = subprocess.run(
+                install, env=env, cwd=home, check=False, capture_output=True
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(binary.read_text(), "user command")
+
     def test_current_diff_and_branch_preferences(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

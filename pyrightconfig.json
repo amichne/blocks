@@ -1,5 +1,5 @@
 {
-  "include": ["blocks.py", "test_blocks.py", "pr", "terminal_editor.py", "test_pr.py"],
+  "include": ["blocks.py", "test_blocks.py", "pr", "terminal_editor.py", "test_pr.py", "install", "evals/agent.py"],
   "typeCheckingMode": "strict",
   "pythonVersion": "3.10"
 }
