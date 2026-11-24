@@ -223,6 +223,43 @@ class BlocksTests(TestCase):
         for keys in ["d\n", "2\n\x07\n"]:
             self.assertIsInstance(interact(parts, StringIO(keys), StringIO()), Declined)
 
+    def test_editor_preview_handoff_and_replay(self) -> None:
+        initial = "Summary\n\n\tDetails\n"
+        editor = {
+            "type": "editor",
+            "id": "body",
+            "label": "Description",
+            "initial": initial,
+        }
+        doc = {"version": 1, "blocks": [editor]}
+        rendered = cli("render", data=json.dumps(doc))
+        self.assertEqual(rendered.stdout, "Description\n" + initial + "\n")
+        pending = cli("run", "--interactive", data=json.dumps(doc))
+        self.assertEqual(
+            (pending.returncode, json.loads(pending.stdout)["request"]), (3, doc)
+        )
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "review.json"
+            path.write_text(json.dumps(doc))
+            for text in ("", "Changed\n\nsecond\n", "\t", "\x1b[2J"):
+                result = cli(
+                    "run", str(path), "--answers", "-", data=json.dumps({"body": text})
+                )
+                if text.startswith("\x1b"):
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+                else:
+                    self.assertEqual(
+                        (
+                            result.returncode,
+                            json.loads(result.stdout)["answers"]["body"],
+                        ),
+                        (0, text),
+                    )
+        invalid = {**doc, "blocks": [{**editor, "initial": "\x1b[2J"}]}
+        self.assertEqual(
+            cli("run", "--interactive", data=json.dumps(invalid)).returncode, 2
+        )
+
     def test_invalid_answers_never_emit_a_result(self) -> None:
         for reply in (
             {},
