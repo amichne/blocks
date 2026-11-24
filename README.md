@@ -4,6 +4,22 @@ Blocks is an early proof of concept for agents and CLI tools that need to ask so
 Everything is open to change, including the commands, JSON formats, terminal interactions, and the overall direction.
 The examples describe what works today.
 
+## Install pull-request
+
+On macOS or Linux with Python 3.10+, Git, and uv, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/amichne/blocks/main/install | python3
+```
+
+This installs `~/.local/bin/pull-request` and two agent skills under `~/.agents/skills`. Put `~/.local/bin` on PATH and start a new agent session to discover them. Run the same installer to update from `main`. Publishing a PR needs an authenticated GitHub CLI.
+
+From a worktree with changes, run `pull-request` or ask your agent to “open a pull request for the current diff.” For a local draft, ask it to prepare the PR and keep it local.
+
+To build a different interaction, ask your agent to “build a release-note review with an editable draft and a publish or hold choice.” The `blocks-workflows` skill composes that interaction with the installed runtime at `~/.local/share/blocks/current/blocks`.
+
+## Use Blocks from source
+
 Give an agent the output of `blocks schema`. The agent can compose a JSON presentation and send it directly to `blocks render`.
 Use `blocks run` when the caller needs answers. The caller decides what each answer does.
 
@@ -55,12 +71,12 @@ If the person declines or dismisses the host's prompt, stop there. Use `blocks s
 
 ### Open a pull request from the current diff
 
-Run `./pr` with no arguments. From another worktree, use the executable's absolute path or put it on `PATH` and run `pr`.
+Run `pull-request` with no arguments from the worktree that contains your changes. From a Blocks source checkout, `./pr` also works.
 The command needs Git, uv, and an `origin` remote on macOS or Linux. Publication also needs an authenticated `gh`.
 
-`pr` targets the default branch on `origin`. It combines commits since the common base with the current contents of staged, unstaged, and new unignored files.
+`pull-request` targets the default branch on `origin`. It combines commits since the common base with the current contents of staged, unstaged, and new unignored files.
 It prepares one local commit and opens the review. The changed paths supply the title and commit message. The description starts with the repository's PR template or a summary of the changed files.
-Edit the description, then choose **Push and open PR** or **Keep local**. Running `pr` again with the same diff and destination reopens the saved review.
+Edit the description, then choose **Push and open PR** or **Keep local**. Running `pull-request` again with the same diff and destination reopens the saved review.
 
 Set the destination once per repository with Git configuration. Add `--global` to apply a preference across repositories.
 
@@ -70,8 +86,8 @@ Set the destination once per repository with Git configuration. Add `--global` t
 | Ask for the branch name each time | `git config blocksPr.branch ask` |
 | Apply a naming convention | `git config blocksPr.branch 'feature/{ticket}-{desc}'` |
 
-`{desc}` expands to a lowercase, hyphenated form of the title. `{ticket}` uses `blocksPr.ticket` if set, or a single ticket such as `ABC-123` in the checked-out branch name. If neither supplies a unique ticket, `pr` asks for one.
-Use `pr --branch <name>` for a one-time override. In a host without a terminal, answer the branch prompt with this override. The review handoff includes the destination branch and review ID for `pr review`.
+`{desc}` expands to a lowercase, hyphenated form of the title. `{ticket}` uses `blocksPr.ticket` if set, or a single ticket such as `ABC-123` in the checked-out branch name. If neither supplies a unique ticket, `pull-request` asks for one.
+Use `pull-request --branch <name>` for a one-time override. In a host without a terminal, answer the branch prompt with this override. The review handoff includes the destination branch and review ID for `pull-request review`.
 
 ### Prepare a pull request with an agent
 
@@ -80,7 +96,7 @@ Use the explicit commands when the calling agent writes the draft or selects a d
 1. **Capture the changes.** Give the agent the JSON from this command.
 
    ```sh
-   ./pr plan feature/retry --base main --scope staged
+   pull-request plan feature/retry --base main --scope staged
    ```
 
    The result contains a plan ID, the selected diff against the remote base, and the first standard PR template found in the selected tree.
@@ -91,7 +107,7 @@ Use the explicit commands when the calling agent writes the draft or selects a d
    Use the template and report checks the agent actually ran. Pass that object through stdin or a file outside the target worktree.
 
    ```sh
-   ./pr prepare feature/retry --draft /tmp/agent-draft.json
+   pull-request prepare feature/retry --draft /tmp/agent-draft.json
    ```
 
    The command creates one commit on a new task branch from the captured base. It runs Git commit hooks in a temporary worktree and checks the resulting tree and parent.
@@ -99,14 +115,14 @@ Use the explicit commands when the calling agent writes the draft or selects a d
 
 3. **Edit the description in place.** The review shows the branch, commit, change counts, and title above the prefilled editor.
    Enter adds a newline. Esc then Enter accepts the text and moves to **Push and open PR** or **Keep local**.
-   Keep local saves the edited description in the repository's Git metadata. Reopen it with `./pr review feature/retry`.
+   Keep local saves the edited description in the repository's Git metadata. Reopen it with `pull-request review feature/retry`.
    Ctrl+C dismisses the review and preserves the last saved draft.
 
 4. **Publish from the terminal or a host.** The terminal pushes only after the publish choice. In a host, exit 3 returns the Blocks `request` and a `review` ID.
    Present the request, then replay the person's exact `{"body":"…","action":"publish"}` or `local` choice.
 
    ```sh
-   ./pr review feature/retry --for-review "$review_id" --answers /tmp/answers.json
+   pull-request review feature/retry --for-review "$review_id" --answers /tmp/answers.json
    ```
 
    A changed draft invalidates an old review ID. If PR creation fails after the push, reopen the saved draft and retry.

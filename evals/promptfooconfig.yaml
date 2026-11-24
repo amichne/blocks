@@ -1,0 +1,28 @@
+description: Discover and use the installed pull-request skill in a disposable Git repository
+prompts: ['{{task}}']
+providers: ['file://agent.py']
+tests:
+  - description: PR-OPEN — open the current diff
+    vars:
+      task: Open a pull request for my current change. Use the default destination and description. You have my approval to publish it.
+    assert:
+      - type: equals
+        value: skill read | reviewed PR published | correct change | URL reported
+  - description: PR-REVIEW — review the same diff without creating a PR
+    vars:
+      task: Review my current change and summarize it. Keep this read-only. Do not prepare or open a PR.
+    assert:
+      - type: equals
+        value: read only | change described
+  - description: BLOCKS-BUILD — create a reusable release-note review
+    vars:
+      task: Build an executable ./review-release with Blocks and save its presentation to release-review.json. Let me edit the initial release note "Increase the timeout" under the ID note, then choose publish or hold under the ID action. With no arguments, show the review or hand it off to the agent host. For host replay, accept --answers FILE. Publish writes the edited note verbatim to approved-note.md in this worktree. Hold leaves that file alone.
+    assert:
+      - type: equals
+        value: workflow skill read | host handoff | edited answers replayed | invalid choice rejected | generated command saved only on publish
+  - description: BLOCKS-EXPLAIN — explain the same review without creating files
+    vars:
+      task: Explain how a Blocks terminal review lets me edit a release note and choose publish or hold when an agent host collects the answers. Keep this read-only.
+    assert:
+      - type: equals
+        value: read only | workflow explained

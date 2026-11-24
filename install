@@ -1,0 +1,122 @@
+#!/usr/bin/env -S uv run --locked --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# [tool.uv]
+# no-build = true
+# [[tool.uv.index]]
+# name = "pypi"
+# url = "https://pypi.org/simple"
+# default = true
+# ///
+"""Install the pull-request command and its agent skill from Blocks."""
+
+import argparse
+import fcntl
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def install(source: Path, home: Path) -> None:
+    store = home / ".local/share/blocks"
+    current = store / "current"
+    links = {
+        home / ".local/bin/pull-request": current / "launch",
+        home / ".agents/skills/pull-request": current / "skills/pull-request",
+        home / ".agents/skills/blocks-workflows": current / "skills/blocks-workflows",
+    }
+    store.mkdir(parents=True, exist_ok=True)
+    with (
+        (store / "install.lock").open("a") as lock,
+        tempfile.TemporaryDirectory(dir=store) as tmp,
+    ):
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for link, target in links.items():
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(link) and not (
+                link.is_symlink() and link.readlink() == target
+            ):
+                raise ValueError(f"installation path already in use: {link}")
+        stage = Path(tmp) / "bundle"
+        stage.mkdir()
+        digest = hashlib.sha256()
+        for name in (
+            "pr",
+            "pr.lock",
+            "blocks.py",
+            "blocks.py.lock",
+            "terminal_editor.py",
+            "terminal_editor.py.lock",
+            "skills/pull-request/SKILL.md",
+            "skills/blocks-workflows/SKILL.md",
+        ):
+            target = stage / {"pr": "pull-request", "pr.lock": "pull-request.lock"}.get(
+                name, name
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            data = (source / name).read_bytes()
+            digest.update(hashlib.sha256(data).digest())
+            target.write_bytes(data)
+        (stage / "pull-request").chmod(0o755)
+        (stage / "blocks.py").chmod(0o755)
+        (stage / "blocks").symlink_to("blocks.py")
+        # uv looks for the lock beside its script argument. Resolve the public
+        # symlink before starting the script so its sibling lock travels with it.
+        launcher = stage / "launch"
+        launcher.write_text(
+            "#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\n"
+            "command = Path(__file__).resolve().with_name('pull-request')\n"
+            "os.execv(command, [str(command), *sys.argv[1:]])\n"
+        )
+        launcher.chmod(0o755)
+        digest.update(launcher.read_bytes())
+        bundle = store / digest.hexdigest()
+        if not bundle.exists():
+            stage.rename(bundle)
+        next_link = Path(tmp) / "current"
+        next_link.symlink_to(bundle.name)
+        os.replace(next_link, current)
+        for link, target in links.items():
+            if not link.is_symlink():
+                link.symlink_to(target)
+            print(link)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source", type=Path, help="install from a local Blocks checkout"
+    )
+    args = parser.parse_args()
+    if not shutil.which("uv"):
+        parser.error("install uv and put it on PATH first")
+    if args.source:
+        install(args.source, Path.home())
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--depth=1",
+                "--branch",
+                "main",
+                "https://github.com/amichne/blocks.git",
+                tmp,
+            ],
+            check=True,
+        )
+        install(Path(tmp), Path.home())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        sys.exit(f"install: {error}")

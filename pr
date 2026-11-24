@@ -29,6 +29,7 @@ from textwrap import indent
 from blocks import decode_json, is_list, is_object, line, markdown, read_json
 
 BLOCKS = Path(__file__).resolve().with_name("blocks")
+COMMAND = Path(sys.argv[0]).name
 
 
 def git(*args: str, data: bytes | None = None, index: str | None = None) -> bytes:
@@ -136,7 +137,9 @@ def default_base() -> str:
         ref, _, name = row.partition("\t")
         if name == "HEAD" and ref.startswith("ref: refs/heads/"):
             return checked_branch(ref.removeprefix("ref: refs/heads/"))
-    raise ValueError("origin has no default branch; set its HEAD or use pr plan --base")
+    raise ValueError(
+        f"origin has no default branch; set its HEAD or use {COMMAND} plan --base"
+    )
 
 
 def make_plan(base: str, paths: list[str], scope: str | None) -> Plan:
@@ -433,7 +436,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         usage="%(prog)s [--branch NAME] | %(prog)s {plan,prepare,review} ...",
         description=(
-            "Run pr with no arguments to review the current diff against origin's default "
+            f"Run {COMMAND} with no arguments to review the current diff against origin's default "
             "branch. Configure the destination with git config blocksPr.branch."
         ),
     )
@@ -546,7 +549,7 @@ def main() -> int:
         ):
             if draft_file.exists() or local_tip(branch):
                 raise ValueError(
-                    "draft or branch already exists; resume with pr review"
+                    f"draft or branch already exists; resume with {COMMAND} review"
                 )
             if (
                 not is_object(draft_input)
@@ -586,7 +589,10 @@ def main() -> int:
         review_id = fingerprint({"request": doc, "commit": sha, "plan": asdict(plan)})
         if answers and args.for_review != review_id:
             raise ValueError("stale review ID; request the current review")
-        print(f"Review {review_id}. Resume with pr review {branch!r}.", file=sys.stderr)
+        print(
+            f"Review {review_id}. Resume with {COMMAND} review {branch!r}.",
+            file=sys.stderr,
+        )
         values = blocks(doc, answers, (review_id, branch))
         draft["body"] = values["body"]
         save(draft_file, draft)
@@ -609,5 +615,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         raise SystemExit(130)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
-        print(f"pr: {error}", file=sys.stderr)
+        print(f"{COMMAND}: {error}", file=sys.stderr)
         raise SystemExit(2)
