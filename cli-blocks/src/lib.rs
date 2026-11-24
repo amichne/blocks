@@ -55,6 +55,7 @@ pub enum Block {
     Table { columns: Vec<String>, rows: Vec<Vec<String>> },
     Choice { id: String, label: String, options: Vec<ChoiceOption> },
     Input { id: String, label: String },
+    Editor { id: String, label: String, initial: String },
 }
 
 #[derive(Debug, Serialize)]

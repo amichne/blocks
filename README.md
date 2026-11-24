@@ -20,6 +20,98 @@ In a UTF-8 color terminal, Blocks highlights titles, aligns numeric columns on t
 Use `blocks render --plain` or `blocks run --plain --interactive` for the plain layout.
 Redirected output, a nonempty `NO_COLOR`, and `TERM=dumb` also select plain text.
 
+### Ask one question
+
+Use `blocks ask focus 'What needs a closer look?'` for a line of text. For a choice, pass a JSON array of labels and values.
+For example, let Tally find the three largest files in a crate. Show their line counts and return the selected path.
+
+```sh
+cargo build --locked --release -p tally
+target/release/tally largest tally/src -n 3 --format json |
+  jq 'map({label:"\(.path) (\(.lines) lines)", value:.path})' |
+  ./blocks ask file 'Which file needs review?' --options -
+```
+
+In a terminal, select a number. The caller gets an answer such as `{"version":1,"answers":{"file":"tally/src/scan.rs"}}`.
+It can open that path or use what it finds to compose the next question.
+
+### Ask through an agent host
+
+Capture stdout and stderr when the host owns the conversation. For `ask` and `run --interactive`, inspect the exit status before reading stdout.
+
+| Exit | Meaning | Caller action |
+| --- | --- | --- |
+| 0 | All questions have answers | Read the `answers` object from stdout. |
+| 2 | Command, input, or I/O error | Read the diagnostic on stderr. |
+| 3 | Input required | Read `request` from stdout and present it to the person. |
+| 4 | The person declined | Stop this request. Stdout is empty. |
+| 130 | The person interrupted or dismissed the prompt | Stop this request. Stdout is empty. |
+
+Exit 3 carries one JSON object with `version: 1`, `status: "input_required"`, and the full presentation in `request`.
+Blocks returns it when stderr is captured or the terminal has no keyboard available. It emits the request before it reads an answer.
+Keep that exact document while the person decides. Save it as `request.json`, then pass their answers to `blocks run request.json --answers -` on stdin.
+Supply option values under their question IDs. Blocks checks them against the choices the person saw, even if the data source has since changed.
+If the person declines or dismisses the host's prompt, stop there. Use `blocks schema result` to inspect both stdout shapes.
+
+### Open a pull request from the current diff
+
+Run `./pr` with no arguments. From another worktree, use the executable's absolute path or put it on `PATH` and run `pr`.
+The command needs Git, uv, and an `origin` remote on macOS or Linux. Publication also needs an authenticated `gh`.
+
+`pr` targets the default branch on `origin`. It combines commits since the common base with the current contents of staged, unstaged, and new unignored files.
+It prepares one local commit and opens the review. The changed paths supply the title and commit message. The description starts with the repository's PR template or a summary of the changed files.
+Edit the description, then choose **Push and open PR** or **Keep local**. Running `pr` again with the same diff and destination reopens the saved review.
+
+Set the destination once per repository with Git configuration. Add `--global` to apply a preference across repositories.
+
+| Branch naming | Setting |
+| --- | --- |
+| Guess from the changed paths and append a short plan ID (default) | `git config blocksPr.branch guess` |
+| Ask for the branch name each time | `git config blocksPr.branch ask` |
+| Apply a naming convention | `git config blocksPr.branch 'feature/{ticket}-{desc}'` |
+
+`{desc}` expands to a lowercase, hyphenated form of the title. `{ticket}` uses `blocksPr.ticket` if set, or a single ticket such as `ABC-123` in the checked-out branch name. If neither supplies a unique ticket, `pr` asks for one.
+Use `pr --branch <name>` for a one-time override. In a host without a terminal, answer the branch prompt with this override. The review handoff includes the destination branch and review ID for `pr review`.
+
+### Prepare a pull request with an agent
+
+Use the explicit commands when the calling agent writes the draft or selects a different base or scope.
+
+1. **Capture the changes.** Give the agent the JSON from this command.
+
+   ```sh
+   ./pr plan feature/retry --base main --scope staged
+   ```
+
+   The result contains a plan ID, the selected diff against the remote base, and the first standard PR template found in the selected tree.
+   Staged scope preserves partial hunks. Use repeated `--path` arguments for literal working-tree paths relative to the repo root, or `--scope all` for all working changes.
+   With unspecified scope, the command asks when unstaged changes exist. If a host captures that question, present it and repeat the plan with the selected scope.
+
+2. **Create the local commit.** The calling agent writes a JSON object with the plan ID in `plan`, its `commit_message`, a PR `title`, and a Markdown `body`.
+   Use the template and report checks the agent actually ran. Pass that object through stdin or a file outside the target worktree.
+
+   ```sh
+   ./pr prepare feature/retry --draft /tmp/agent-draft.json
+   ```
+
+   The command creates one commit on a new task branch from the captured base. It runs Git commit hooks in a temporary worktree and checks the resulting tree and parent.
+   Your original checkout keeps its branch, staged hunks, and working files. If selected changes conflict with the base, planning stops.
+
+3. **Edit the description in place.** The review shows the branch, commit, change counts, and title above the prefilled editor.
+   Enter adds a newline. Esc then Enter accepts the text and moves to **Push and open PR** or **Keep local**.
+   Keep local saves the edited description in the repository's Git metadata. Reopen it with `./pr review feature/retry`.
+   Ctrl+C dismisses the review and preserves the last saved draft.
+
+4. **Publish from the terminal or a host.** The terminal pushes only after the publish choice. In a host, exit 3 returns the Blocks `request` and a `review` ID.
+   Present the request, then replay the person's exact `{"body":"…","action":"publish"}` or `local` choice.
+
+   ```sh
+   ./pr review feature/retry --for-review "$review_id" --answers /tmp/answers.json
+   ```
+
+   A changed draft invalidates an old review ID. If PR creation fails after the push, reopen the saved draft and retry.
+   The command checks the reviewed commit and remote branch and recognizes an existing matching PR. If the base advances, prepare a new plan on a new branch.
+
 ### Request a Tally report
 
 Tally counts files and lines by extension or ranks files by line count. The local Apple Silicon executable is `./bin/tally`.
@@ -117,15 +209,19 @@ echo '{"version":1,"blocks":[{"type":"heading","text":"Build"},{"type":"list","i
 | `section` | `title`, `blocks` | Title with indented children |
 | `choice` | `id`, `label`, `options` | Numbered options with stable values |
 | `input` | `id`, `label` | Single-line text prompt |
+| `editor` | `id`, `label`, `initial` | Prefilled multiline text with inline cursor editing |
 
 Each option has a display `label` and a unique `value` within its choice. Each question needs a unique `id` across the document.
-IDs and option values start with an ASCII letter and can contain letters, digits, underscores, periods, and hyphens.
-Text must contain at least one character. Use separate text blocks for separate lines.
+Question IDs start with an ASCII letter and can contain letters, digits, underscores, periods, and hyphens.
+Option values accept nonempty single-line text, including paths, spaces, and Unicode. Blocks returns each value verbatim.
+Use separate text blocks for separate display lines. The editor accepts empty text, tabs, and LF newlines, including the final newline.
+Only interactive editing uses the locked prompt-toolkit helper through uv. Rendering and host replay use the Python standard library.
 
 ### Collect answers
 
 For a person, use `--interactive`. The terminal displays the questions on stderr. The caller receives one JSON object on stdout after the last answer.
 The person selects a number. The caller receives the corresponding option value, even if the display order changes.
+At a choice, enter `d` to decline. At a text prompt, press Ctrl+G and then Enter to decline. Both discard earlier answers in that request.
 
 For an agent or CI job, pass an answer object by file or stdin. Supply exactly one answer per question.
 

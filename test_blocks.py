@@ -4,9 +4,10 @@ import subprocess
 import sys
 from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-from blocks import interact, presentation
+from blocks import Declined, interact, presentation
 
 ROOT = Path(__file__).resolve().parent
 EXAMPLE = ROOT / "example.json"
@@ -160,6 +161,104 @@ class BlocksTests(TestCase):
         self.assertIn("Enter one line of text.", display.getvalue())
         with self.assertRaises(EOFError):
             interact(parts, StringIO("1\n"), StringIO())
+
+    def test_host_can_replay_the_exact_choice_document(self) -> None:
+        path = "src/1 $(literal) 文.rs"
+        options = [{"value": path, "label": "Review source"}]
+        handoff = cli(
+            "ask", "file", "Which file?", "--options", "-", data=json.dumps(options)
+        )
+        self.assertEqual((handoff.returncode, handoff.stderr), (3, ""))
+        doc = {
+            "version": 1,
+            "blocks": [
+                {
+                    "type": "choice",
+                    "id": "file",
+                    "label": "Which file?",
+                    "options": options,
+                }
+            ],
+        }
+        self.assertEqual(
+            json.loads(handoff.stdout),
+            {"version": 1, "status": "input_required", "request": doc},
+        )
+        with TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "request.json"
+            snapshot.write_text(json.dumps(doc))
+            for value, status in [(path, 0), ("Review source", 2)]:
+                answers = {"file": value}
+                replay = cli(
+                    "run", str(snapshot), "--answers", "-", data=json.dumps(answers)
+                )
+                self.assertEqual(replay.returncode, status, replay.stderr)
+                if status == 0:
+                    self.assertEqual(
+                        json.loads(replay.stdout), {"version": 1, "answers": answers}
+                    )
+                else:
+                    self.assertEqual(replay.stdout, "")
+
+    def test_ask_and_run_share_input_validation(self) -> None:
+        reply = cli("ask", "focus", "Why?", "--answers", "-", data='{"focus":"d"}')
+        self.assertEqual(
+            (reply.returncode, json.loads(reply.stdout)["answers"]), (0, {"focus": "d"})
+        )
+        for argv, data in [
+            (["ask", "bad/id", "Why?"], ""),
+            (["ask", "ok", "Why?", "--options", "-"], '[{"value":"x\\n","label":"X"}]'),
+            (["ask", "ok", "Why?", "--options", "-", "--answers", "-"], "[]"),
+        ]:
+            with self.subTest(argv=argv):
+                failure = cli(*argv, data=data)
+                self.assertEqual((failure.returncode, failure.stdout), (2, ""))
+        empty = cli("run", "--interactive", data='{"version":1,"blocks":[]}')
+        self.assertEqual(
+            (empty.returncode, json.loads(empty.stdout)["answers"]), (0, {})
+        )
+
+    def test_decline_discards_the_whole_request(self) -> None:
+        parts = presentation(json.loads(EXAMPLE.read_text()))
+        for keys in ["d\n", "2\n\x07\n"]:
+            self.assertIsInstance(interact(parts, StringIO(keys), StringIO()), Declined)
+
+    def test_editor_preview_handoff_and_replay(self) -> None:
+        initial = "Summary\n\n\tDetails\n"
+        editor = {
+            "type": "editor",
+            "id": "body",
+            "label": "Description",
+            "initial": initial,
+        }
+        doc = {"version": 1, "blocks": [editor]}
+        rendered = cli("render", data=json.dumps(doc))
+        self.assertEqual(rendered.stdout, "Description\n" + initial + "\n")
+        pending = cli("run", "--interactive", data=json.dumps(doc))
+        self.assertEqual(
+            (pending.returncode, json.loads(pending.stdout)["request"]), (3, doc)
+        )
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "review.json"
+            path.write_text(json.dumps(doc))
+            for text in ("", "Changed\n\nsecond\n", "\t", "\x1b[2J"):
+                result = cli(
+                    "run", str(path), "--answers", "-", data=json.dumps({"body": text})
+                )
+                if text.startswith("\x1b"):
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+                else:
+                    self.assertEqual(
+                        (
+                            result.returncode,
+                            json.loads(result.stdout)["answers"]["body"],
+                        ),
+                        (0, text),
+                    )
+        invalid = {**doc, "blocks": [{**editor, "initial": "\x1b[2J"}]}
+        self.assertEqual(
+            cli("run", "--interactive", data=json.dumps(invalid)).returncode, 2
+        )
 
     def test_invalid_answers_never_emit_a_result(self) -> None:
         for reply in (
