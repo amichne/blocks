@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO, TypeGuard
@@ -29,6 +31,10 @@ from typing import TextIO, TypeGuard
 
 class Invalid(ValueError):
     """A document or response violates the protocol."""
+
+
+class Declined:
+    """The person explicitly declined the whole request."""
 
 
 ID = r"[A-Za-z][A-Za-z0-9_.-]*"
@@ -80,7 +86,7 @@ def schema() -> dict[str, object]:
                 "minItems": 1,
                 "items": record(
                     {
-                        "value": ref("id"),
+                        "value": ref("line"),
                         "label": ref("line"),
                     }
                 ),
@@ -122,6 +128,33 @@ def picker_schema() -> dict[str, object]:
                 },
             }
         ),
+    }
+
+
+def result_schema() -> dict[str, object]:
+    definition = schema()
+    version = {"const": 1}
+    answers = {
+        "type": "object",
+        "propertyNames": {"$ref": "#/$defs/id"},
+        "additionalProperties": {"$ref": "#/$defs/line"},
+        "description": "Exactly the question IDs and allowed values from this request.",
+    }
+    request = record({"version": version, "blocks": {"$ref": "#/$defs/blocks"}})
+    return {
+        "$schema": definition["$schema"],
+        "$defs": definition["$defs"],
+        "title": "Blocks run and ask stdout v1",
+        "oneOf": [
+            record({"version": version, "answers": answers}),
+            record(
+                {
+                    "version": version,
+                    "status": {"const": "input_required"},
+                    "request": request,
+                }
+            ),
+        ],
     }
 
 
@@ -355,7 +388,7 @@ def presentation(
                         opt = f"{at}.options[{i}]"
                         if not is_object(option) or option.keys() != {"value", "label"}:
                             raise Invalid(f"{opt} needs exactly value and label")
-                        value = identifier(option["value"], opt + ".value")
+                        value = line(option["value"], opt + ".value")
                         if value in values:
                             raise Invalid(f"{opt} repeats option value {value}")
                         values[value] = None
@@ -381,7 +414,7 @@ def supplied_answers(parts: list[Part], supplied: object) -> dict[str, str]:
 
 def interact(
     parts: list[Part], keyboard: TextIO, display: TextIO, styled: bool = False
-) -> dict[str, str]:
+) -> dict[str, str] | Declined:
     answers: dict[str, str] = {}
     for part in parts:
         if isinstance(part, str):
@@ -389,7 +422,11 @@ def interact(
             continue
         choices = {str(i): v for i, v in enumerate(part.options, 1)}
         while True:
-            prompt = f"Select 1-{len(choices)}" if choices else "Enter text"
+            prompt = (
+                f"Select 1-{len(choices)} or d to decline"
+                if choices
+                else "Enter text (Ctrl+G then Enter to decline)"
+            )
             hint = f"{prompt} [{part.id}]"
             cursor = ink(hint, ACCENT) + ink(" › ", KEY) if styled else f"{hint} > "
             print(cursor, end="", file=display, flush=True)
@@ -397,6 +434,8 @@ def interact(
             if not reply:
                 raise EOFError
             value = reply.rstrip("\r\n")
+            if value == "\x07" or (choices and value == "d"):
+                return Declined()
             try:
                 answers[part.id] = part.answer(choices.get(value) if choices else value)
                 break
@@ -592,6 +631,11 @@ def browse(
         return fields[1]
 
 
+def input_required(document: object) -> int:
+    print(json.dumps({"version": 1, "status": "input_required", "request": document}))
+    return 3
+
+
 def main() -> int:
     if (
         len(sys.argv) == 3
@@ -602,9 +646,14 @@ def main() -> int:
         return 0
     parser = argparse.ArgumentParser(prog="blocks", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    schemas = commands.add_parser("schema", help="print a JSON input schema")
+    schemas = commands.add_parser("schema", help="print a JSON protocol schema")
+    schema_kinds = {
+        "presentation": schema,
+        "picker": picker_schema,
+        "result": result_schema,
+    }
     schemas.add_argument(
-        "kind", choices=("presentation", "picker"), nargs="?", default="presentation"
+        "kind", choices=schema_kinds, nargs="?", default="presentation"
     )
     pick = commands.add_parser(
         "pick", help="resolve a searchable branch into a presentation"
@@ -637,25 +686,35 @@ def main() -> int:
         "render", help="display a presentation in the terminal"
     )
     run = commands.add_parser("run", help="collect answers and print a JSON result")
+    ask = commands.add_parser("ask", help="ask one question and print a JSON result")
+    ask.add_argument("id", help="question ID used in the answer object")
+    ask.add_argument("label", help="question shown to the person")
+    ask.add_argument(
+        "--options",
+        metavar="FILE",
+        help="JSON array of value/label pairs (- for stdin)",
+    )
     for command in (render, run):
-        command.add_argument(
-            "--plain", action="store_true", help="use the plain text layout"
-        )
         command.add_argument(
             "document", nargs="?", default="-", help="JSON file (default: stdin)"
         )
-    mode = run.add_mutually_exclusive_group(required=True)
-    mode.add_argument(
-        "--answers", metavar="FILE", help="read a JSON answer object (- for stdin)"
-    )
-    mode.add_argument(
-        "--interactive", action="store_true", help="ask questions at the terminal"
-    )
+    for command in (render, run, ask):
+        command.add_argument(
+            "--plain", action="store_true", help="use the plain text layout"
+        )
+    for command in (run, ask):
+        mode = command.add_mutually_exclusive_group(required=command is run)
+        mode.add_argument(
+            "--answers", metavar="FILE", help="read a JSON answer object (- for stdin)"
+        )
+        mode.add_argument(
+            "--interactive",
+            action="store_true",
+            help="prompt if visible, otherwise return input_required (default for ask)",
+        )
     args = parser.parse_args()
     if args.command == "schema":
-        print(
-            json.dumps(picker_schema() if args.kind == "picker" else schema(), indent=2)
-        )
+        print(json.dumps(schema_kinds[args.kind](), indent=2))
         return 0
     if args.command == "pick":
         if args.provider == [] or (args.provider and args.request_only):
@@ -680,8 +739,16 @@ def main() -> int:
             )
         )
         return 0
-    if args.command == "run" and args.answers == args.document == "-":
+    source = args.options if args.command == "ask" else args.document
+    if args.command != "render" and args.answers == source == "-":
         parser.error("only one input can use stdin")
+    if args.command == "ask":
+        block: dict[str, object] = {"type": "input", "id": args.id, "label": args.label}
+        if source is not None:
+            block.update(type="choice", options=read_json(source))
+        document = {"version": 1, "blocks": [block]}
+    else:
+        document = read_json(source)
     stream = sys.stdout if args.command == "render" else sys.stderr
     width = os.get_terminal_size(stream.fileno()).columns if stream.isatty() else None
     styled = (
@@ -691,7 +758,7 @@ def main() -> int:
         and os.environ.get("TERM") != "dumb"
         and stream.encoding.lower().replace("-", "") == "utf8"
     )
-    parts = presentation(read_json(args.document), width, styled)
+    parts = presentation(document, width, styled)
     if args.command == "render":
         for part in parts:
             if isinstance(part, str):
@@ -699,13 +766,31 @@ def main() -> int:
         return 0
     if args.answers is not None:
         answers = supplied_answers(parts, read_json(args.answers))
-    elif sys.stdin.isatty() and args.document != "-":
+    elif not any(isinstance(part, Question) for part in parts) or (
+        sys.stderr.isatty() and sys.stdin.isatty() and source != "-"
+    ):
         answers = interact(parts, sys.stdin, sys.stderr, styled)
+    elif not sys.stderr.isatty():
+        return input_required(document)
     else:
         # A piped document leaves stdin at EOF. Read keys from the terminal.
         terminal = "CONIN$" if os.name == "nt" else "/dev/tty"
-        with open(terminal, encoding="utf-8") as keyboard:
+        with ExitStack() as stack:
+            try:
+                keyboard = stack.enter_context(open(terminal, encoding="utf-8"))
+            except OSError as error:
+                if error.errno in (
+                    errno.ENXIO,
+                    errno.ENODEV,
+                    errno.ENOENT,
+                    errno.ENOTTY,
+                ):
+                    return input_required(document)
+                raise
             answers = interact(parts, keyboard, sys.stderr, styled)
+    if isinstance(answers, Declined):
+        print("blocks: declined", file=sys.stderr)
+        return 4
     print(json.dumps({"version": 1, "answers": answers}, ensure_ascii=True))
     return 0
 

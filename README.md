@@ -20,6 +20,39 @@ In a UTF-8 color terminal, Blocks highlights titles, aligns numeric columns on t
 Use `blocks render --plain` or `blocks run --plain --interactive` for the plain layout.
 Redirected output, a nonempty `NO_COLOR`, and `TERM=dumb` also select plain text.
 
+### Ask one question
+
+Use `blocks ask focus 'What needs a closer look?'` for a line of text. For a choice, pass a JSON array of labels and values.
+For example, let Tally find the three largest files in a crate. Show their line counts and return the selected path.
+
+```sh
+cargo build --locked --release -p tally
+target/release/tally largest tally/src -n 3 --format json |
+  jq 'map({label:"\(.path) (\(.lines) lines)", value:.path})' |
+  ./blocks ask file 'Which file needs review?' --options -
+```
+
+In a terminal, select a number. The caller gets an answer such as `{"version":1,"answers":{"file":"tally/src/scan.rs"}}`.
+It can open that path or use what it finds to compose the next question.
+
+### Ask through an agent host
+
+Capture stdout and stderr when the host owns the conversation. For `ask` and `run --interactive`, inspect the exit status before reading stdout.
+
+| Exit | Meaning | Caller action |
+| --- | --- | --- |
+| 0 | All questions have answers | Read the `answers` object from stdout. |
+| 2 | Command, input, or I/O error | Read the diagnostic on stderr. |
+| 3 | Input required | Read `request` from stdout and present it to the person. |
+| 4 | The person declined | Stop this request. Stdout is empty. |
+| 130 | The person interrupted or dismissed the prompt | Stop this request. Stdout is empty. |
+
+Exit 3 carries one JSON object with `version: 1`, `status: "input_required"`, and the full presentation in `request`.
+Blocks returns it when stderr is captured or the terminal has no keyboard available. It emits the request before it reads an answer.
+Keep that exact document while the person decides. Save it as `request.json`, then pass their answers to `blocks run request.json --answers -` on stdin.
+Supply option values under their question IDs. Blocks checks them against the choices the person saw, even if the data source has since changed.
+If the person declines or dismisses the host's prompt, stop there. Use `blocks schema result` to inspect both stdout shapes.
+
 ### Request a Tally report
 
 Tally counts files and lines by extension or ranks files by line count. The local Apple Silicon executable is `./bin/tally`.
@@ -119,13 +152,15 @@ echo '{"version":1,"blocks":[{"type":"heading","text":"Build"},{"type":"list","i
 | `input` | `id`, `label` | Single-line text prompt |
 
 Each option has a display `label` and a unique `value` within its choice. Each question needs a unique `id` across the document.
-IDs and option values start with an ASCII letter and can contain letters, digits, underscores, periods, and hyphens.
+Question IDs start with an ASCII letter and can contain letters, digits, underscores, periods, and hyphens.
+Option values accept nonempty single-line text, including paths, spaces, and Unicode. Blocks returns each value verbatim.
 Text must contain at least one character. Use separate text blocks for separate lines.
 
 ### Collect answers
 
 For a person, use `--interactive`. The terminal displays the questions on stderr. The caller receives one JSON object on stdout after the last answer.
 The person selects a number. The caller receives the corresponding option value, even if the display order changes.
+At a choice, enter `d` to decline. At a text prompt, press Ctrl+G and then Enter to decline. Both discard earlier answers in that request.
 
 For an agent or CI job, pass an answer object by file or stdin. Supply exactly one answer per question.
 
