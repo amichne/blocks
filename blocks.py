@@ -39,6 +39,7 @@ class Declined:
 
 ID = r"[A-Za-z][A-Za-z0-9_.-]*"
 UNSAFE = r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]"
+UNSAFE_DOCUMENT = r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]"
 FIELDS = {
     "heading": {"text": "line"},
     "text": {"text": "line"},
@@ -47,6 +48,7 @@ FIELDS = {
     "section": {"title": "line", "blocks": "blocks"},
     "choice": {"id": "id", "label": "line", "options": "options"},
     "input": {"id": "id", "label": "line"},
+    "editor": {"id": "id", "label": "line", "initial": "markdown"},
 }
 
 
@@ -73,6 +75,7 @@ def schema() -> dict[str, object]:
         **record({"version": {"const": 1}, "blocks": ref("blocks")}),
         "$defs": {
             "line": {"type": "string", "minLength": 1, "not": {"pattern": UNSAFE}},
+            "markdown": {"type": "string", "not": {"pattern": UNSAFE_DOCUMENT}},
             "id": {"type": "string", "pattern": f"^{ID}$", "allOf": [ref("line")]},
             "lines": {"type": "array", "items": ref("line")},
             "columns": {"type": "array", "minItems": 1, "items": ref("line")},
@@ -137,7 +140,7 @@ def result_schema() -> dict[str, object]:
     answers = {
         "type": "object",
         "propertyNames": {"$ref": "#/$defs/id"},
-        "additionalProperties": {"$ref": "#/$defs/line"},
+        "additionalProperties": {"$ref": "#/$defs/markdown"},
         "description": "Exactly the question IDs and allowed values from this request.",
     }
     request = record({"version": version, "blocks": {"$ref": "#/$defs/blocks"}})
@@ -219,7 +222,30 @@ class Question:
         return answer
 
 
-Part = str | Question
+@dataclass(frozen=True)
+class Editor:
+    id: str
+    initial: str
+
+    def answer(self, value: object) -> str:
+        return markdown(value, f"answer {self.id}")
+
+
+def markdown(value: object, path: str) -> str:
+    if not isinstance(value, str) or re.search(UNSAFE_DOCUMENT, value):
+        raise Invalid(f"{path} needs text with LF newlines and no terminal controls")
+    return value
+
+
+Part = str | Question | Editor
+
+
+def preview(parts: list[Part]) -> None:
+    for part in parts:
+        if isinstance(part, str):
+            print(part)
+        elif isinstance(part, Editor):
+            print(part.initial)
 
 
 def ink(text: str, rendition: str) -> str:
@@ -343,7 +369,7 @@ def presentation(
             if (
                 styled
                 and parts
-                and kind in ("heading", "section", "input", "choice", "text")
+                and kind in ("heading", "section", "input", "choice", "editor", "text")
             ):
                 parts.append("")
             if kind == "heading":
@@ -380,6 +406,11 @@ def presentation(
                     + (ink("? ", ACCENT) + ink(label, STRONG) if styled else label)
                 )
                 values: dict[str, None] = {}
+                if kind == "editor":
+                    parts.append(
+                        Editor(key, markdown(block["initial"], at + ".initial"))
+                    )
+                    continue
                 if kind == "choice":
                     options = block["options"]
                     if not is_list(options) or not options:
@@ -404,7 +435,7 @@ def presentation(
 
 
 def supplied_answers(parts: list[Part], supplied: object) -> dict[str, str]:
-    questions = [part for part in parts if isinstance(part, Question)]
+    questions = [part for part in parts if not isinstance(part, str)]
     if not is_object(supplied) or supplied.keys() != {q.id for q in questions}:
         raise Invalid(
             "answers must contain exactly the question IDs in the presentation"
@@ -419,6 +450,24 @@ def interact(
     for part in parts:
         if isinstance(part, str):
             print(part, file=display)
+            continue
+        if isinstance(part, Editor):
+            with tempfile.TemporaryDirectory() as directory:
+                draft = Path(directory) / "draft.md"
+                draft.write_bytes(part.initial.encode("utf-8"))
+                helper = Path(__file__).resolve().with_name("terminal_editor.py")
+                edit = subprocess.run(
+                    ["uv", "run", "--locked", "--script", str(helper), str(draft)],
+                    stdin=keyboard,
+                    stderr=display,
+                    stdout=subprocess.PIPE,
+                    check=False,
+                )
+            if edit.returncode in (130, -2):
+                raise EOFError
+            if edit.returncode:
+                raise Invalid(f"terminal editor exited {edit.returncode}")
+            answers[part.id] = part.answer(edit.stdout.decode("utf-8"))
             continue
         choices = {str(i): v for i, v in enumerate(part.options, 1)}
         while True:
@@ -541,11 +590,11 @@ def pick_preview(offset: int) -> None:
         return
     doc = branch.resolve([str(arg) for arg in provider])
     width = int(os.environ.get("FZF_PREVIEW_COLUMNS", "80"))
-    for part in presentation(
-        doc, width=width, styled=os.environ.get("BLOCKS_PICK_COLOR") == "1"
-    ):
-        if isinstance(part, str):
-            print(part)
+    preview(
+        presentation(
+            doc, width=width, styled=os.environ.get("BLOCKS_PICK_COLOR") == "1"
+        )
+    )
 
 
 def browse(
@@ -760,13 +809,11 @@ def main() -> int:
     )
     parts = presentation(document, width, styled)
     if args.command == "render":
-        for part in parts:
-            if isinstance(part, str):
-                print(part)
+        preview(parts)
         return 0
     if args.answers is not None:
         answers = supplied_answers(parts, read_json(args.answers))
-    elif not any(isinstance(part, Question) for part in parts) or (
+    elif all(isinstance(part, str) for part in parts) or (
         sys.stderr.isatty() and sys.stdin.isatty() and source != "-"
     ):
         answers = interact(parts, sys.stdin, sys.stderr, styled)
