@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tally report request",
+  "type": "object",
+  "properties": {
+    "command": {"enum": ["count", "largest"]},
+    "path": {"type": "string", "default": "."},
+    "top": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615, "default": 5}
+  },
+  "required": ["command"],
+  "additionalProperties": false,
+  "if": {"properties": {"command": {"const": "count"}}},
+  "then": {"not": {"required": ["top"]}}
+}

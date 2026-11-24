@@ -1,0 +1,18 @@
+[package]
+name = "tally"
+version = "0.1.0"
+edition = "2021"
+description = "Count files and lines in a folder. A Rust + clap starter project."
+
+[dependencies]
+anyhow = "1"                                          # Easy error handling with context messages
+cli-blocks = { path = "../cli-blocks" }
+clap.workspace = true
+clap_complete = "4.5"                                 # Shell completion scripts
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]                                    # Used only by tests
+assert_cmd = "2"                                      # Run the real binary in tests
+predicates = "3"                                      # Check output text
+tempfile = "3"                                        # Make throwaway test folders

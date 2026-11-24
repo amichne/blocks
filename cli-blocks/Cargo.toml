@@ -1,0 +1,9 @@
+[package]
+name = "cli-blocks"
+version = "0.1.0"
+edition = "2021"
+description = "Composable clap options and JSON terminal presentations"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true

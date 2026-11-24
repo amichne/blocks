@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "label": "Choose a workspace view",
+  "options": [
+    {
+      "value": "review",
+      "label": "Review a change",
+      "blocks": [
+        {"type": "heading", "text": "Review a change"},
+        {"type": "input", "id": "focus", "label": "What needs a closer look?"}
+      ]
+    },
+    {
+      "value": "counts",
+      "label": "Count files by extension",
+      "blocks": [{"type": "text", "text": "Scope: tally/src"}],
+      "request": {"command": "count", "path": "tally/src"}
+    },
+    {
+      "value": "largest",
+      "label": "Largest source files",
+      "request": {"command": "largest", "path": "tally/src", "top": 3}
+    }
+  ]
+}

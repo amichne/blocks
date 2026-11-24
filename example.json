@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "blocks": [
+    {"type": "heading", "text": "Review the change"},
+    {"type": "section", "title": "Changed files", "blocks": [
+      {"type": "list", "items": ["cli.py", "README.md"]}
+    ]},
+    {"type": "text", "text": "Choose the next review step."},
+    {"type": "choice", "id": "next", "label": "What needs review?", "options": [
+      {"value": "code", "label": "Implementation"},
+      {"value": "docs", "label": "Documentation"}
+    ]},
+    {"type": "input", "id": "focus", "label": "What should the reviewer look for?"}
+  ]
+}

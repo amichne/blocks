@@ -1,0 +1,5 @@
+{
+  "include": ["blocks.py", "test_blocks.py"],
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.10"
+}
