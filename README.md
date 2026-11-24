@@ -53,10 +53,29 @@ Keep that exact document while the person decides. Save it as `request.json`, th
 Supply option values under their question IDs. Blocks checks them against the choices the person saw, even if the data source has since changed.
 If the person declines or dismisses the host's prompt, stop there. Use `blocks schema result` to inspect both stdout shapes.
 
+### Open a pull request from the current diff
+
+Run `./pr` with no arguments. From another worktree, use the executable's absolute path or put it on `PATH` and run `pr`.
+The command needs Git, uv, and an `origin` remote on macOS or Linux. Publication also needs an authenticated `gh`.
+
+`pr` targets the default branch on `origin`. It combines commits since the common base with the current contents of staged, unstaged, and new unignored files.
+It prepares one local commit and opens the review. The changed paths supply the title and commit message. The description starts with the repository's PR template or a summary of the changed files.
+Edit the description, then choose **Push and open PR** or **Keep local**. Running `pr` again with the same diff and destination reopens the saved review.
+
+Set the destination once per repository with Git configuration. Add `--global` to apply a preference across repositories.
+
+| Branch naming | Setting |
+| --- | --- |
+| Guess from the changed paths and append a short plan ID (default) | `git config blocksPr.branch guess` |
+| Ask for the branch name each time | `git config blocksPr.branch ask` |
+| Apply a naming convention | `git config blocksPr.branch 'feature/{ticket}-{desc}'` |
+
+`{desc}` expands to a lowercase, hyphenated form of the title. `{ticket}` uses `blocksPr.ticket` if set, or a single ticket such as `ABC-123` in the checked-out branch name. If neither supplies a unique ticket, `pr` asks for one.
+Use `pr --branch <name>` for a one-time override. In a host without a terminal, answer the branch prompt with this override. The review handoff includes the destination branch and review ID for `pr review`.
+
 ### Prepare a pull request with an agent
 
-The separate `pr` executable composes Git, Blocks, and GitHub CLI. Run it from the target worktree on macOS or Linux.
-Use its absolute path if the worktree belongs to another project. The workflow needs Git, uv, an `origin` remote, and an authenticated `gh` for publication.
+Use the explicit commands when the calling agent writes the draft or selects a different base or scope.
 
 1. **Capture the changes.** Give the agent the JSON from this command.
 

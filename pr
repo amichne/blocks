@@ -18,11 +18,13 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from textwrap import indent
 
 from blocks import decode_json, is_list, is_object, line, markdown, read_json
 
@@ -55,7 +57,7 @@ def remote_tip(base: str) -> str:
 def blocks(
     document: dict[str, object],
     answers: Path | None = None,
-    review_id: str | None = None,
+    review: tuple[str, str] | None = None,
 ) -> dict[str, str]:
     mode = ["--interactive"] if answers is None else ["--answers", str(answers)]
     result = subprocess.run(
@@ -65,11 +67,12 @@ def blocks(
         check=False,
     )
     if result.returncode:
-        if result.returncode == 3 and review_id is not None:
+        if result.returncode == 3 and review is not None:
             pending = decode_json(result.stdout, "Blocks handoff")
             if not is_object(pending):
                 raise ValueError("invalid Blocks handoff")
-            print(json.dumps({**pending, "review": review_id}))
+            review_id, branch = review
+            print(json.dumps({**pending, "review": review_id, "branch": branch}))
         else:
             sys.stdout.buffer.write(result.stdout)
         raise SystemExit(result.returncode)
@@ -128,6 +131,14 @@ def origin_url() -> str:
     return origin
 
 
+def default_base() -> str:
+    for row in git_text("ls-remote", "--symref", "origin", "HEAD").splitlines():
+        ref, _, name = row.partition("\t")
+        if name == "HEAD" and ref.startswith("ref: refs/heads/"):
+            return checked_branch(ref.removeprefix("ref: refs/heads/"))
+    raise ValueError("origin has no default branch; set its HEAD or use pr plan --base")
+
+
 def make_plan(base: str, paths: list[str], scope: str | None) -> Plan:
     origin = origin_url()
     parent = remote_tip(base)
@@ -140,22 +151,24 @@ def make_plan(base: str, paths: list[str], scope: str | None) -> Plan:
         raise ValueError("resolve unmerged entries before preparing a PR")
     with tempfile.TemporaryDirectory() as directory:
         index = str(Path(directory) / "index")
-        if paths or select_scope(scope) == "all":
-            git("read-tree", head, index=index)
+        if paths or select_scope(scope) in ("all", "current"):
+            initial_tree = git_text("write-tree") if scope == "current" else head
+            git("read-tree", initial_tree, index=index)
             git(
                 "--literal-pathspecs", "add", "-A", "--", *(paths or ["."]), index=index
             )
             tree = git("write-tree", index=index).decode().strip()
         else:
             tree = git_text("write-tree")
-        if head != parent:
+        baseline = git_text("merge-base", head, parent) if scope == "current" else head
+        if baseline != parent:
             patch = git(
                 "diff",
                 "--binary",
                 "--full-index",
                 "--no-ext-diff",
                 "--no-textconv",
-                head,
+                baseline,
                 tree,
             )
             if not patch:
@@ -200,6 +213,11 @@ def fingerprint(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def save_plan(branch: str, path: Path, plan: Plan) -> None:
+    git("update-ref", "refs/blocks/plans/" + fingerprint(branch), plan.tree)
+    save(path, asdict(plan))
+
+
 def local_tip(branch: str) -> str:
     ref = "refs/heads/" + branch
     for row in git_text(
@@ -209,6 +227,78 @@ def local_tip(branch: str) -> str:
         if name == ref:
             return sha
     return ""
+
+
+def current_title(plan: Plan) -> str:
+    rows = git_text(
+        "-c",
+        "core.quotePath=true",
+        "diff",
+        "--name-status",
+        "--no-renames",
+        "--ignore-submodules=none",
+        "--no-color",
+        plan.parent,
+        plan.tree,
+    ).splitlines()
+    status, _, path = rows[0].partition("\t")
+    verb = {"A": "Add", "D": "Delete"}.get(status, "Update")
+    if len(rows) == 1:
+        return f"{verb} {path[:100]}"
+    others = len(rows) - 1
+    return f"Update {path[:80]} and {others} other {'file' if others == 1 else 'files'}"
+
+
+def ask_text(key: str, label: str) -> str:
+    return blocks(
+        {
+            "version": 1,
+            "blocks": [{"type": "input", "id": key, "label": label}],
+        }
+    )[key]
+
+
+def current_branch(plan: Plan, title: str) -> str:
+    pattern = git_text("config", "--default", "guess", "--get", "blocksPr.branch")
+    desc = re.sub("[^a-z0-9]+", "-", title.lower())[:60].strip("-")
+    if pattern == "guess":
+        return f"pr/{desc}-{fingerprint(asdict(plan))[:8]}"
+    if pattern == "ask":
+        return ask_text("branch", "Branch to push")
+    literal = pattern.replace("{desc}", "").replace("{ticket}", "")
+    if "{" in literal or "}" in literal:
+        raise ValueError("branch templates support {ticket} and {desc}")
+    if "{ticket}" in pattern:
+        ticket = git_text("config", "--default", "", "--get", "blocksPr.ticket")
+        if not ticket:
+            source = git_text("branch", "--show-current")
+            matches = set(
+                re.findall(
+                    r"(?<![A-Za-z0-9])([A-Z][A-Z0-9]*-[0-9]+)(?![A-Za-z0-9])", source
+                )
+            )
+            ticket = (
+                matches.pop()
+                if len(matches) == 1
+                else ask_text("ticket", "Ticket for the branch name")
+            )
+        pattern = pattern.replace("{ticket}", ticket)
+    return pattern.replace("{desc}", desc)
+
+
+def current_body(plan: Plan, title: str) -> str:
+    if body := template(plan.tree):
+        return body
+    stat = git_text(
+        "-c",
+        "core.quotePath=true",
+        "diff",
+        "--stat",
+        "--no-color",
+        plan.parent,
+        plan.tree,
+    )
+    return f"{title}\n\n{indent(stat, '    ')}\n"
 
 
 def commit(plan: Plan, message: str) -> str:
@@ -340,8 +430,20 @@ def publish(branch: str, plan: Plan, draft: dict[str, str], folder: Path) -> str
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        usage="%(prog)s [--branch NAME] | %(prog)s {plan,prepare,review} ...",
+        description=(
+            "Run pr with no arguments to review the current diff against origin's default "
+            "branch. Configure the destination with git config blocksPr.branch."
+        ),
+    )
+    parser.add_argument(
+        "--branch",
+        dest="run_branch",
+        metavar="NAME",
+        help="override the branch for the current diff",
+    )
+    commands = parser.add_subparsers(dest="command")
     plan_cmd = commands.add_parser(
         "plan", help="capture selected changes for the calling agent"
     )
@@ -366,6 +468,8 @@ def main() -> int:
     for cmd in (plan_cmd, prepare, review):
         cmd.add_argument("branch", help="new local task branch for this PR")
     args = parser.parse_args()
+    if args.command and args.run_branch is not None:
+        parser.error("--branch applies only to the current diff")
     if any(
         key in os.environ
         for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
@@ -378,7 +482,26 @@ def main() -> int:
         args.answers.resolve() if args.command == "review" and args.answers else None
     )
     os.chdir(git_text("rev-parse", "--show-toplevel"))
-    branch = checked_branch(args.branch)
+    current = None
+    if args.command is None:
+        current = make_plan(default_base(), [], "current")
+        title = current_title(current)
+        name = (
+            current_branch(current, title)
+            if args.run_branch is None
+            else args.run_branch
+        )
+        branch = checked_branch(name)
+        if branch == current.base:
+            raise ValueError("choose a task branch different from the base")
+        draft_input = {
+            "plan": fingerprint(asdict(current)),
+            "commit_message": title,
+            "title": title,
+            "body": current_body(current, title),
+        }
+    else:
+        branch = checked_branch(args.branch)
     folder = (
         Path(git_text("rev-parse", "--git-common-dir")).resolve()
         / "blocks-pr"
@@ -401,13 +524,26 @@ def main() -> int:
                 "template": template(plan.tree),
                 "instructions": "Return plan, commit_message, title and body. Use the diff and template. Describe only checks you observed.",
             }
-            # Keep the immutable selection reachable while the agent drafts the PR.
-            git("update-ref", "refs/blocks/plans/" + fingerprint(branch), plan.tree)
-            save(plan_file, asdict(plan))
+            save_plan(branch, plan_file, plan)
             print(json.dumps(prompt))
             return 0
-        plan = Plan(**load(plan_file))
-        if args.command == "prepare":
+        if current is not None:
+            if plan_file.exists() and Plan(**load(plan_file)) != current:
+                raise ValueError("this branch has another plan; choose a new branch")
+            if not draft_file.exists():
+                if local_tip(branch) or git_text(
+                    "ls-remote", "origin", "refs/heads/" + branch
+                ):
+                    raise ValueError(
+                        "task branch already exists; choose a new branch with --branch"
+                    )
+                save_plan(branch, plan_file, current)
+            plan = current
+        else:
+            plan = Plan(**load(plan_file))
+        if args.command == "prepare" or (
+            current is not None and not draft_file.exists()
+        ):
             if draft_file.exists() or local_tip(branch):
                 raise ValueError(
                     "draft or branch already exists; resume with pr review"
@@ -451,7 +587,7 @@ def main() -> int:
         if answers and args.for_review != review_id:
             raise ValueError("stale review ID; request the current review")
         print(f"Review {review_id}. Resume with pr review {branch!r}.", file=sys.stderr)
-        values = blocks(doc, answers, review_id)
+        values = blocks(doc, answers, (review_id, branch))
         draft["body"] = values["body"]
         save(draft_file, draft)
         if values["action"] == "local":

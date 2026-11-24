@@ -9,6 +9,104 @@ ROOT = Path(__file__).resolve().parent
 
 
 class PullRequestFlow(TestCase):
+    def test_current_diff_and_branch_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root / "work"
+            work.mkdir()
+            env = {
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+
+            def run(*args: str, status: int = 0) -> str:
+                proc = subprocess.run(
+                    args,
+                    cwd=work,
+                    env=env,
+                    input="",
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, status, proc.stderr)
+                return proc.stdout if status != 2 else proc.stderr
+
+            pr = str(ROOT / "pr")
+            remote = str(root / "remote")
+            run("git", "init", "--bare", "-b", "trunk", remote)
+            run("git", "init", "-b", "trunk")
+            run("git", "config", "user.name", "Test")
+            run("git", "config", "user.email", "test@example.invalid")
+            run("git", "remote", "add", "origin", remote)
+            (work / ".gitignore").write_text("ignored\n")
+            run("git", "add", ".gitignore")
+            run("git", "commit", "-m", "Initial")
+            run("git", "push", "origin", "trunk")
+            self.assertIn("empty", run(pr, status=2))
+
+            run("git", "switch", "-c", "work/ABC-42")
+            (work / "committed").touch()
+            run("git", "add", "committed")
+            run("git", "commit", "-m", "Start feature")
+            run("git", "switch", "trunk")
+            (work / "upstream").touch()
+            run("git", "add", "upstream")
+            run("git", "commit", "-m", "Advance base")
+            run("git", "push", "origin", "trunk")
+            run("git", "switch", "work/ABC-42")
+            (work / "mixed").write_text("stage")
+            run("git", "add", "mixed")
+            (work / "mixed").write_text("working")
+            (work / "new file").touch()
+            (work / "ignored").touch()
+
+            review = json.loads(run(pr, status=3))
+            branch = review["branch"]
+            self.assertRegex(
+                branch, r"^pr/update-committed-and-2-other-files-[0-9a-f]{8}$"
+            )
+            self.assertEqual(
+                run("git", "rev-parse", branch + "^"), run("git", "rev-parse", "trunk")
+            )
+            self.assertEqual(
+                run("git", "diff", "--name-only", "trunk", branch).splitlines(),
+                ["committed", "mixed", "new file"],
+            )
+            self.assertEqual(run("git", "show", branch + ":mixed"), "working")
+            self.assertEqual(run("git", "show", ":mixed"), "stage")
+            self.assertEqual(
+                run("git", "branch", "--show-current").strip(), "work/ABC-42"
+            )
+            self.assertEqual(
+                run("git", "ls-remote", "origin", "refs/heads/" + branch), ""
+            )
+            self.assertEqual(json.loads(run(pr, status=3))["review"], review["review"])
+
+            run("git", "config", "blocksPr.branch", "ask")
+            prompt = json.loads(run(pr, status=3))
+            self.assertEqual(prompt["request"]["blocks"][0]["id"], "branch")
+            self.assertIn(
+                "already exists", run(pr, "--branch", "work/ABC-42", status=2)
+            )
+            self.assertEqual(
+                json.loads(run(pr, "--branch", "manual", status=3))["branch"], "manual"
+            )
+            run("git", "config", "blocksPr.branch", "feature/{ticket}-{desc}")
+            named = json.loads(run(pr, status=3))["branch"]
+            self.assertEqual(named, "feature/ABC-42-update-committed-and-2-other-files")
+            run("git", "branch", "-m", "no-ticket")
+            question = json.loads(run(pr, status=3))["request"]["blocks"][0]
+            self.assertEqual(question["id"], "ticket")
+            run("git", "config", "blocksPr.ticket", "TASK-8")
+            self.assertTrue(
+                json.loads(run(pr, status=3))["branch"].startswith("feature/TASK-8-")
+            )
+            run("git", "config", "blocksPr.branch", "feature/{unknown}")
+            self.assertIn("branch templates", run(pr, status=2))
+
     def test_partial_index_review_and_publish_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
